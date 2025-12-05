@@ -1,77 +1,93 @@
-// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// © ZenAndTheArtOfTrading | updated: ATR-based trailing stop
 //@version=6
-strategy('MR System - RSI', overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=20, max_lines_count=500)
+// © ZenAndTheArtOfTrading | Cleaned & Simplified
+strategy('MR System - RSI', overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=20)
 
-// Inputs
-float Stretch = input.float(0.5, 'Entry Stretch (ATR multiplier)')
-float StopLossStretch = input.float(2.0, 'StopLoss Stretch (ATR multiplier)')
-// Get indicator values
-long_atr    = ta.atr(25)
-rsi         = ta.rsi(close, 14)
-rsi_avg     = ta.sma(rsi, 14) 
-turnover    = ta.sma(volume * close, 5)
-long_sma    = ta.sma(close,50)
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+enableLongs = input.bool(true, 'Enable Long Positions', group='Trade Direction')
+enableShorts = input.bool(false, 'Enable Short Positions', group='Trade Direction')
+entryStretch = input.float(0.5, 'Entry Stretch (ATR)', minval=0)
+stopStretch = input.float(2.0, 'Stop Loss (ATR)', minval=0.1)
 
-// Prepare conditions 
-isUptrend   = close > long_sma
-isLiquid    = turnover > 1000000
+// ═══════════════════════════════════════════════════════════════════════════
+// INDICATORS
+// ═══════════════════════════════════════════════════════════════════════════
+atr = ta.atr(25)
+rsi = ta.rsi(close, 14)
+rsiAvg = ta.sma(rsi, 14)
+turnover = ta.sma(volume * close, 5)
+sma50 = ta.sma(close, 50)
 
-// Check entry conditions 
-LongTrigger = isLiquid and isUptrend
-RSICheck   = ta.crossover(rsi,rsi_avg)
-LongSetup = LongTrigger and RSICheck and rsi < 80
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ═══════════════════════════════════════════════════════════════════════════
+isLiquid = turnover > 1000000
 
-// Manage pending entry orders: place limit buy only when setup exists and we have no current position
-if (LongSetup) and (strategy.position_size == 0)
-    // Place a single limit order identified by 'Buy'
-    strategy.order('Buy', strategy.long)
-    // line.new(bar_index, LongLimit, bar_index + 1, LongLimit, extend = extend.none, color = color.lime)
-else
-    // If setup disappears and we do not have a position, cancel the pending 'Buy' order
-    if (strategy.position_size == 0)
-        strategy.cancel('Buy')
+// Long conditions
+isUptrend = close > sma50
+rsiCrossUp = ta.crossover(rsi, rsiAvg)
+longSetup = isUptrend and isLiquid and rsiCrossUp and rsi < 80
 
-// Trailing stop state variables
-var float trail_stop = na
-var float highest_since_entry = na
+// Short conditions
+isDowntrend = close < sma50
+rsiCrossDown = ta.crossunder(rsi, rsiAvg)
+shortSetup = isDowntrend and isLiquid and rsiCrossDown and rsi > 20
 
-// Detect entry / exit events
-just_entered = (strategy.position_size > 0) and (strategy.position_size[1] == 0)
-just_exited  = (strategy.position_size == 0) and (strategy.position_size[1] > 0)
+noPosition = strategy.position_size == 0
 
-// Initialize trailing stop on entry using LongTerm ATR
-if just_entered
-    entry_price = strategy.position_avg_price
-    atr_off = long_atr * StopLossStretch
-    trail_stop := entry_price - atr_off
-    highest_since_entry := high  // start tracking highs from entry
+// ═══════════════════════════════════════════════════════════════════════════
+// TRAILING STOP LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+var float trailStop = na
+var float extremePrice = na
 
-// While in a long position, update highest_since_entry and trail (only move up)
-if strategy.position_size > 0
-    highest_since_entry := math.max(nz(highest_since_entry, high), high)
-    atr_off = long_atr * StopLossStretch
-    new_trail = highest_since_entry - atr_off
-    // only move trail up, never down
-    trail_stop := math.max(nz(trail_stop, new_trail), new_trail)
+justEnteredLong = strategy.position_size > 0 and strategy.position_size[1] == 0
+justEnteredShort = strategy.position_size < 0 and strategy.position_size[1] == 0
+inLongPosition = strategy.position_size > 0
+inShortPosition = strategy.position_size < 0
 
-    // Place/update the exit order referencing the original 'Buy' entry
-    strategy.exit('Exit', from_entry='Buy', stop=trail_stop)
+// Initialize on long entry
+if justEnteredLong
+    trailStop := strategy.position_avg_price - (atr * stopStretch)
+    extremePrice := high
 
-// Clear vars on full exit
-if just_exited
-    trail_stop := na
-    highest_since_entry := na
+// Initialize on short entry
+if justEnteredShort
+    trailStop := strategy.position_avg_price + (atr * stopStretch)
+    extremePrice := low
 
-// Check exitReason also includes SMA condition (optional)
-// ExitReason = close < ShortTerm_SMA or (strategy.position_size > 0 and close < trail_stop)
-ExitReason = (strategy.position_size > 0 and close < trail_stop)
+// Update trailing stop for longs (only moves up)
+if inLongPosition
+    extremePrice := math.max(extremePrice, high)
+    newStop = extremePrice - (atr * stopStretch)
+    trailStop := math.max(trailStop, newStop)
 
-// If explicit immediate close is required (redundant with strategy.exit above), you can do:
-if strategy.position_size != 0 and ExitReason
-    strategy.close_all()
+// Update trailing stop for shorts (only moves down)
+if inShortPosition
+    extremePrice := math.min(extremePrice, low)
+    newStop = extremePrice + (atr * stopStretch)
+    trailStop := math.min(trailStop, newStop)
 
-// Plots / visuals
-plotshape(LongSetup, style = shape.triangleup, location = location.belowbar, color = color.green)
-plot(strategy.position_size > 0 ? trail_stop : na, title='ATR Trailing Stop', color=color.yellow, linewidth=2, style=plot.style_linebr)
-plot(long_sma, "50 SMA", color = color.blue)
+// ═══════════════════════════════════════════════════════════════════════════
+// TRADE EXECUTION
+// ═══════════════════════════════════════════════════════════════════════════
+if longSetup and noPosition and enableLongs
+    strategy.entry('Long', strategy.long)
+
+if shortSetup and noPosition and enableShorts
+    strategy.entry('Short', strategy.short)
+
+if inLongPosition
+    strategy.exit('Exit Long', 'Long', stop=trailStop)
+
+if inShortPosition
+    strategy.exit('Exit Short', 'Short', stop=trailStop)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VISUALIZATION
+// ═══════════════════════════════════════════════════════════════════════════
+plotshape(longSetup, 'Long Signal', shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortSetup, 'Short Signal', shape.triangledown, location.abovebar, color.red, size=size.small)
+plot(inLongPosition or inShortPosition ? trailStop : na, 'Trailing Stop', color.yellow, 2, plot.style_linebr)
+plot(sma50, '50 SMA', color.blue, 2)
